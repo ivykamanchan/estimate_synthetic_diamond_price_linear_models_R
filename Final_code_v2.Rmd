@@ -1,0 +1,625 @@
+---
+title: "**Estimating the Impact of Synthetic Diamond’s Weight on Sale Price**"
+subtitle: "Datasci 203 Lab 2 - Research report for Acme Synthetic Diamond Company"
+author: "Ivy Chan, Jonathan Hodges, Dipika Kumar, Christian Lee"
+date: "December 6, 2022"
+output:
+  bookdown::pdf_document2: 
+    toc: true
+    number_sections: true
+    spacing: single
+header-includes:    
+  \usepackage{caption}
+  \captionsetup[figure]{labelformat=empty}
+  
+---
+
+\newpage
+\setcounter{page}{1}
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load packages and set options, include=FALSE}
+library(tidyverse)
+library(magrittr)
+library(stargazer)
+library(sandwich)
+library(lmtest)
+library(ggplot2)
+library(reshape2)
+library(dplyr)
+library(tidyr)
+library(moments)
+library(olsrr)
+library(caret)
+library(mltools)
+library(data.table)
+
+theme_set(theme_bw())
+```
+
+```{r load data, message = FALSE, include=FALSE}
+original_diamonds <- read.csv("./data/diamonds.csv")
+```
+
+```{r split data for exploration set and confirmation set, message = FALSE, include=FALSE}
+#use 70% of dataset as confirmation_set and 30% as exploration_set
+sample <- sample(c(TRUE, FALSE), nrow(diamonds), replace=TRUE, prob=c(0.7,0.3))
+confirmation_set <- original_diamonds[sample, ]
+diamonds <- original_diamonds[!sample, ]
+nrow(confirmation_set)
+nrow(diamonds)
+```
+
+# Introduction
+New technological advances in synthetic diamond manufacturing have led to increased carats of the produced synthetic diamonds. Acme Synthetic Diamond Company is still using the older manufacturing process. Since upgrading the new equipment will be expensive, they have to decide if it is economically viable. Generally, diamonds with larger weights or carat values sell for higher prices, a more precise data analysis is required to justify such a large investment.
+
+This study estimates how large of a factor the carats of synthetic diamonds are on the sale price of the diamond. We leverage synthetic diamond sales observations with the sold diamonds' characteristics, including carat, color, clarity, cut, length, width, and depth. Applying a set of regression models, we estimate how much the synthetic diamond weight in carats influences price with respect to other factors.
+
+# Data and Methodology
+The data in this study comes from the diamonds dataset on Kaggle ^[EDA & Applying Multiple linear regression. "https://www.kaggle.com/code/abhijit10singh/eda-applying-multiple-linear-regression/data/" (2021).] It was made publicly available by Abhijit Singh in 2021.The data includes 53,940 observations of synthetic diamond sales with 10 variables. We transformed 7 of the 10 variables to the log scale to remove skewness and make them more symmetrical with more normal distributions. We have determined that records with a value of zero in columns volume, length, width, depth, and table were to be removed since it is impossible for a physical dimension of a diamond to be an absolute zero. This filtering removes 20 observations and leaves us with 53,920 observations. In addition, we removed 17 observations that have the infinite natural log volume value and that leaves us with 53,903 observationsin our data set.
+
+We assigned 30\% of the data to the exploration set, 16,171 observations, and the remaining 70\% of the data to the confirmation set, which is 37,732 observations. The large observation sizes are sufficient for the central limit theorem (CLT) to hold. The exploration set was used to inspect the data’s trend and build models, while the confirmation set was used to test our model on new data.\
+
+![](images/accounting_table.jpg)
+
+
+```{r summary dataset, message = FALSE, include=FALSE}
+head(diamonds)
+summary(diamonds)
+dim(diamonds)
+summary(factor(diamonds$cut))
+summary(factor(diamonds$carat))
+summary(factor(diamonds$color))
+summary(factor(diamonds$clarity))
+summary(factor(diamonds$depth))
+summary(factor(diamonds$table))
+summary(factor(diamonds$price))
+summary(factor(diamonds$x))
+summary(factor(diamonds$y))
+summary(factor(diamonds$z))
+```
+
+```{r data cleaning, message = FALSE, include=FALSE}
+diamonds %>% drop_na()
+diamonds <- subset(diamonds, select=c(carat, cut, color, clarity, depth, table, price, x, y, z))
+```
+
+```{r checking dataset, message = FALSE, include=FALSE}
+summary(diamonds)
+dim(diamonds)
+boxplot(price ~ x, data=diamonds, main="Diamonds",
+   xlab="Length", ylab="Price")
+
+boxplot(price ~ y, data=diamonds, main="Diamonds",
+   xlab="Width", ylab="Price")
+
+boxplot(price ~ z, data=diamonds, main="Diamonds",
+   xlab="Depth", ylab="Price")
+
+boxplot(price ~ depth, data=diamonds, main="Diamonds",
+   xlab="Total Depth %", ylab="Price")
+
+boxplot(price ~ table, data=diamonds, main="Diamonds",
+   xlab="Table", ylab="Price")
+```
+
+```{r integer encoding for cut, message = FALSE, include=FALSE}
+#Cut
+factors <- factor(diamonds$cut)
+as.numeric (factors)
+
+cut_category <- c("Fair", "Good", "Very Good", "Premium", "Ideal")
+cut_ordered <- factor(diamonds$cut, levels=cut_category)
+diamonds$cut_in_num_order <- c(as.numeric(cut_ordered))
+
+#Color
+factors <- factor(diamonds$color)
+as.numeric (factors)
+
+color_category <- c("D", "E", "F", "G", "H", "I", "J")
+color_ordered <- factor(diamonds$color, levels=color_category)
+diamonds$color_in_num_order <- c(as.numeric(color_ordered))
+
+#Clarity 
+factors <- factor(diamonds$clarity)
+as.numeric (factors)
+
+diamonds$clarity <- factor(diamonds$clarity, levels = c("IF", "VVS1", "VVS2", "VS1", "VS2", "SI1", "SI2", "I1"))
+
+clarity_category <- c("IF", "VVS1", "VVS2", "VS1", "VS2", "SI1", "SI2", "I1")
+clarity_ordered <- factor(diamonds$clarity, levels=clarity_category)
+diamonds$clarity_in_num_order <- c(as.numeric(clarity_ordered))
+```
+
+```{r rename and create columns, message = FALSE, include=FALSE}
+colnames(diamonds)[colnames(diamonds) == 'depth'] <- 'depth_in_percent'
+colnames(diamonds)[colnames(diamonds) == 'table'] <- 'table_in_percent'
+colnames(diamonds)[colnames(diamonds) == 'x'] <- 'length_in_mm'
+colnames(diamonds)[colnames(diamonds) == 'y'] <- 'width_in_mm'
+colnames(diamonds)[colnames(diamonds) == 'z'] <- 'depth_in_mm'
+diamonds <- within(diamonds, volume <- width_in_mm * length_in_mm * depth_in_mm)
+```
+
+```{r drop rows with 0 in x, y, z, depth, table, volume, message = FALSE, include=FALSE}
+diamonds <- subset(diamonds, length_in_mm != 0 )
+diamonds <- subset(diamonds, width_in_mm != 0 )
+diamonds <- subset(diamonds, depth_in_mm != 0 )
+diamonds <- subset(diamonds, depth_in_percent != 0 )
+diamonds <- subset(diamonds, table_in_percent != 0 )
+diamonds <- subset(diamonds, volume != 0 )
+dim(diamonds)
+```
+
+```{r checking data, message = FALSE, include=FALSE}
+summary(diamonds$volume)
+summary(diamonds$price)
+summary(diamonds$carat)
+hist(diamonds$price)
+hist(diamonds$carat)
+hist(diamonds$volume)
+```
+
+```{r log diamonds, message = FALSE, include=FALSE}
+diamonds[,c('depth_in_percent','depth_in_mm','carat','price','width_in_mm','length_in_mm','table_in_percent','volume')] <- log(diamonds[,c('depth_in_percent','depth_in_mm','carat','price','width_in_mm','length_in_mm','table_in_percent','volume')])
+head(diamonds)
+```
+
+```{r plot carat distribution, echo=FALSE, results='hide', message = FALSE, include=FALSE}
+carat_dist = dnorm(diamonds$carat, mean(diamonds$carat), sd(diamonds$carat))
+plot(diamonds$carat,carat_dist)
+
+depth_in_percent_dist = dnorm(diamonds$depth_in_percent, mean(diamonds$depth_in_percent), sd(diamonds$depth_in_percent))
+plot(diamonds$depth_in_percent,depth_in_percent_dist)
+
+table_in_percent_dist = dnorm(diamonds$table_in_percent, mean(diamonds$table_in_percent), sd(diamonds$table_in_percent))
+plot(diamonds$table_in_percent,table_in_percent_dist)
+```
+
+``` {r Large Sample Assumptions, message = FALSE, include=FALSE}
+
+# Looking at the distribution of Variance of the different features
+hist(diamonds$price)
+hist(diamonds$carat)
+hist(diamonds$volume)
+```
+
+```{r create correlation table, message = FALSE, include=FALSE}
+data <- cor(diamonds[sapply(diamonds, is.numeric)])
+data
+```
+
+```{r create heatmap, message = FALSE, include=FALSE}
+data <- cor(diamonds[sapply(diamonds, is.numeric)])
+data1 <- melt(data)
+ggplot(data1, aes(x = Var1, y = Var2, fill = value)) +
+                  geom_tile() + 
+                  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+                  #geom_text(aes(label = value)) +
+                  #scale_fill_gradient(low = "white", high = "#1b98e0") +
+                  
+
+```
+
+```{r create scatter plots, message = FALSE, include=FALSE, fig.show='hide'}
+#Price based on Carat
+
+ggplot(diamonds, aes(carat, price)) +
+        geom_point() + 
+        ggtitle("Price based on Carat") +
+        geom_smooth(method = "lm")
+
+#Price based on Depth
+ggplot(diamonds, aes(x = depth_in_percent, y = price)) +
+        geom_point() + 
+        ggtitle("Price based on Depth") +
+        geom_smooth(method = "lm")
+
+#Price based on table_in_percent
+ggplot(diamonds, aes(x = table_in_percent, y = price)) +
+        geom_point() + 
+        ggtitle("Price based on Table") +
+        geom_smooth(method = "lm")
+
+#create scatter plot price based carat
+ggplot(diamonds, aes(x=carat, y=price, color=clarity)) +
+        geom_point(alpha=0.5, size=5) + 
+        ggtitle("Price based on Carat and Clarity") +
+        geom_smooth(method = "lm", color="black") +
+        labs(color="clarity") +
+        scale_fill_discrete(breaks=c("IF", "VVS1", "VVS2", "VS1", "VS2", "SI1", "SI2", "I1"))
+
+```
+
+To predict the price model with the different diamond features, we had to operationalize varying features. The price is metric and was operationalized as the response variable of the model, while the carat, volume, clarity, and color were used as predictor variables. The volume variable, a metric feature, is made of three different features in the data set, the multiplication of the width_in_mm, height_in_mm, and depth_in_mm of the diamond. The rationale for multiplying the three metric features to be one feature denoted as volume is to simplify the interpretation of the model. The clarity, color, and cut are categorical variables that were operationalized by being hot encoded to ordinal features. Having these variables as ordinals defines the categorical variables to their price worth based on their physical properties and will generate a more precise model. 
+
+Utilizing the exploration set and going through the EDA process, plotting the different variables against price, generating different histograms, and running some models with the exploration set, we determined a natural log of of skewed variables depth_in_percent, depth_in_mm, carat, price, width_in_mm, length_in_mm, table_in_percent would produce a better model.\newline
+
+
+```{r create scatter plot price based carat, echo=FALSE, message = FALSE, include=FALSE}
+ggplot(diamonds, aes(x=carat, y=price, color=clarity)) +
+        geom_point(alpha=0.5, size=5) + 
+        ggtitle("Price based on Carat and Clarity") +
+        geom_smooth(method = "lm", color="black") +
+        labs(color="clarity") +
+        scale_fill_discrete(breaks=c("IF", "VVS1", "VVS2", "VS1", "VS2", "SI1", "SI2", "I1"))
+
+```
+
+
+![](images/price_on_carat_clarity_visual.jpg)
+
+
+
+$$
+  \widehat{price}=\beta_0 + \beta_1C+ \mathbf{Z\gamma}
+$$
+
+
+We are interested in estimating the sale price of synthetic diamonds based on the weight of the diamonds in carats. $\beta_0$ is the intercept, and $\beta_1$ is the expected change in price based on per unit change in $C$ (carats). $\mathbf{Z}$ is a row vector of additional covariates and $\mathbf{\gamma}$ is a column vector of coefficients.
+
+
+
+``` {r linear model 1 diamonds, message = FALSE, include=FALSE, fig.show='hide'}
+mod1ex = lm(formula = (price ~ carat), data = diamonds)
+summary(mod1ex)
+
+hist(carat_dist, main= "Carat Distribution")
+hist(diamonds$price, main= "Price Distribution")
+#skewness for carat
+skewness(diamonds$carat)
+#skewness for price
+skewness(diamonds$price)
+#The dataset could be clustered if the diamonds was made in the same location.
+
+ggplot(diamonds, aes(carat, price, color=cut)) +
+        geom_point() + 
+        ggtitle("Price based on Carat")
+
+#LCE
+ggplot(mod1ex,aes(x = predict(mod1ex), y = resid(mod1ex))) +
+  geom_point() + 
+  ggtitle('Residuals vs Fitted') + 
+  stat_smooth()
+
+ggplot(diamonds,aes(x = price, y = resid(mod1ex))) +
+  geom_point() + 
+  ggtitle('Price vs Fitted') + 
+  stat_smooth()
+
+# Homoskedaciy
+plot(mod1ex, which = 3)
+bptest(diamonds$price ~ diamonds$carat)
+
+#Distribution of errors
+hist(mod1ex$residuals)
+plot(mod1ex, which = 2)
+```
+
+``` {r linear model 2 diamonds, message = FALSE, include=FALSE, fig.show='hide'}
+mod2ex = lm(formula = (price ~ carat + color_in_num_order + clarity_in_num_order), data = diamonds)
+summary(mod2ex)
+
+hist(carat_dist, main= "Carat Distribution")
+hist(diamonds$price, main= "Price Distribution")
+
+#skewness for carat
+skewness(diamonds$carat)
+#skewness for price
+skewness(diamonds$price)
+#skewness for Clarity
+skewness(diamonds$clarity_in_num_order)
+#skewness for Color
+skewness(diamonds$color_in_num_order)
+
+#The dataset could be clustered if the diamonds was made in the same location.
+ggplot(diamonds, aes(carat, price, color=cut)) +
+        geom_point() + 
+        ggtitle("Price vs Carat")
+ggplot(diamonds, aes(color_in_num_order, price)) +
+        geom_point() + 
+        ggtitle("Price vs Color")
+ggplot(diamonds, aes(clarity_in_num_order, price)) +
+        geom_point() + 
+        ggtitle("Price vs Clarity")
+
+coeftest(mod2ex, vcovHC(mod2ex))
+vcovHC(mod2ex)
+ols_vif_tol(mod2ex)
+
+#LCE
+ggplot(mod2ex,aes(x = predict(mod2ex), y = resid(mod2ex))) +
+  geom_point() + 
+  ggtitle('Residuals vs Fitted') + 
+  stat_smooth()
+
+ggplot(diamonds,aes(x = price, y = resid(mod2ex))) +
+  geom_point() + 
+  ggtitle('Price vs Fitted') + 
+  stat_smooth()
+
+# Homoskedaciy
+plot(mod2ex, which = 3)
+bptest(mod2ex)
+
+#Distribution of errors
+hist(mod2ex$residuals)
+plot(mod2ex, which = 2)
+
+#anova
+anova(mod2ex,mod1ex,test = "F")
+
+```
+
+``` {r linear model 3 diamonds, message = FALSE, include=FALSE, fig.show='hide'}
+mod3ex = lm(formula = (price ~ carat + color_in_num_order + clarity_in_num_order + volume), data = diamonds)
+summary(mod3ex)
+
+hist(carat_dist, main= "Carat Distribution")
+hist(diamonds$price, main= "Price Distribution")
+hist(diamonds$depth_in_percent, main= "Depth")
+hist(diamonds$volume, main= "Volume")
+hist(diamonds$table_in_percent, main= "Table")
+#skewness for carat
+skewness(diamonds$carat)
+#skewness for price
+skewness(diamonds$price)
+#skewness for Volume
+skewness(diamonds$volume)
+#skewness for Clarity
+skewness(diamonds$clarity)
+#skewness for Color
+skewness(diamonds$color)
+
+
+#The dataset could be clustered if the diamonds was made in the same location.
+ggplot(diamonds, aes(carat, price, color=cut)) +
+        geom_point() + 
+        ggtitle("Price vs Carat")
+ggplot(diamonds, aes(color, price)) +
+        geom_point() + 
+        ggtitle("Price vs Color")
+ggplot(diamonds, aes(clarity, price)) +
+        geom_point() + 
+        ggtitle("Price vs Clarity")
+ggplot(diamonds, aes(volume, price)) +
+        geom_point() + 
+        ggtitle("Price vs Volume")
+
+coeftest(mod3ex, vcovHC(mod3ex))
+ols_vif_tol(mod3ex)
+
+#LCE
+ggplot(mod3ex,aes(x = predict(mod3ex), y = resid(mod3ex))) +
+  geom_point() + 
+  ggtitle('Residuals vs Fitted') + 
+  stat_smooth()
+
+ggplot(diamonds,aes(x = price, y = resid(mod3ex))) +
+  geom_point() + 
+  ggtitle('Price vs Fitted') + 
+  stat_smooth()
+
+ggplot(diamonds,aes(x = volume, y = resid(mod3ex))) +
+  geom_point() + 
+  ggtitle('Volume vs Fitted') + 
+  stat_smooth()
+
+# Homoskedaciy
+plot(mod3ex, which = 3)
+bptest(mod3ex)
+
+#Distribution of errors
+hist(mod3ex$residuals)
+plot(mod3ex, which = 2)
+
+anova(mod3ex,mod2ex,test = "F")
+anova(mod3ex,mod1ex,test = "F")
+```
+
+```{r display regression table - diamonds, message=FALSE, echo=FALSE, results='asis', include=FALSE}
+stargazer(mod1ex, mod2ex, mod3ex, 
+          #type = "latex",
+          type = "text",
+          style = "default", 
+          out = "models.txt", 
+          #column.labels = c("Mod1ex", "Mod2ex", "Mod3ex"), 
+          column.labels = NULL,
+          column.separate = NULL,
+          intercept.bottom = FALSE,
+          header = FALSE,
+          digits = 2,
+          title = "Table 1: Estimated Regressions",
+          dep.var.caption  = "Output Variable: price per carat",
+          dep.var.labels   = c("","",""),
+          star.cutoffs = c(0.05, 0.01, 0.001),
+          covariate.labels = c("Constant", "Carat", "Color", "Clarity", "Volume (Length * Width * Depth)"),
+          align = TRUE,
+          no.space=TRUE,
+          omit.stat = "f",
+          notes = "\\parbox[t]{7cm}{$HC_1$ robust standard errors in parentheses.}" 
+          )
+
+```
+
+``` {r data cleaning for confirmation_set, message = FALSE, include=FALSE}
+confirmation_set %>% drop_na()
+confirmation_set <- subset(confirmation_set, select=c(carat, cut, color, clarity, depth, table, price, x, y, z))
+#Cut
+factors <- factor(confirmation_set$cut)
+as.numeric (factors)
+cut_category <- c("Fair", "Good", "Very Good", "Premium", "Ideal")
+cut_ordered <- factor(confirmation_set$cut, levels=cut_category)
+confirmation_set$cut_in_num_order <- c(as.numeric(cut_ordered))
+#Color
+factors <- factor(confirmation_set$color)
+as.numeric (factors)
+color_category <- c("D", "E", "F", "G", "H", "I", "J")
+color_ordered <- factor(confirmation_set$color, levels=color_category)
+confirmation_set$color_in_num_order <- c(as.numeric(color_ordered))
+#Clarity 
+factors <- factor(confirmation_set$clarity)
+as.numeric (factors)
+clarity_category <- c("IF", "VVS1", "VVS2", "VS1", "VS2", "SI1", "SI2", "I1")
+clarity_ordered <- factor(confirmation_set$clarity, levels=clarity_category)
+confirmation_set$clarity_in_num_order <- c(as.numeric(clarity_ordered))
+colnames(confirmation_set)[colnames(confirmation_set) == 'depth'] <- 'depth_in_percent'
+colnames(confirmation_set)[colnames(confirmation_set) == 'table'] <- 'table_in_percent'
+colnames(confirmation_set)[colnames(confirmation_set) == 'x'] <- 'length_in_mm'
+colnames(confirmation_set)[colnames(confirmation_set) == 'y'] <- 'width_in_mm'
+colnames(confirmation_set)[colnames(confirmation_set) == 'z'] <- 'depth_in_mm'
+confirmation_set <- within(confirmation_set, volume <- width_in_mm * length_in_mm * depth_in_mm)
+confirmation_set[,c('depth_in_percent','depth_in_mm','carat','price','width_in_mm','length_in_mm','table_in_percent','volume')] <- log(confirmation_set[,c('depth_in_percent','depth_in_mm','carat','price','width_in_mm','length_in_mm','table_in_percent','volume')])
+#sum(is.infinite(confirmation_set$volume))
+confirmation_set$volume[is.infinite(confirmation_set$volume)] <- NA
+confirmation_set <- na.omit(confirmation_set)
+#sum(is.na(confirmation_set$volume))
+```
+
+``` {r linear model 1, message = FALSE, include=FALSE, fig.show='hide'}
+mod1 = lm(formula = (price ~ carat), data = confirmation_set)
+summary(mod1)
+
+hist(carat_dist, main= "Carat Distribution")
+hist(confirmation_set$price, main= "Price Distribution")
+#skewness for carat
+skewness(confirmation_set$carat)
+#skewness for price
+skewness(confirmation_set$price)
+#The dataset could be clustered if the diamonds was made in the same location.
+
+ggplot(confirmation_set, aes(carat, price, color=cut)) +
+        geom_point() + 
+        ggtitle("Price based on Carat")
+
+```
+
+``` {r linear model 2, message = FALSE, include=FALSE, fig.show='hide'}
+mod2 = lm(formula = (price ~ carat + color_in_num_order + clarity_in_num_order), data = confirmation_set)
+summary(mod2)
+
+hist(carat_dist, main= "Carat Distribution")
+hist(confirmation_set$price, main= "Price Distribution")
+
+#skewness for carat
+skewness(confirmation_set$carat)
+#skewness for price
+skewness(confirmation_set$price)
+#skewness for Clarity
+skewness(confirmation_set$clarity_in_num_order)
+#skewness for Color
+skewness(confirmation_set$color_in_num_order)
+
+#The dataset could be clustered if the diamonds was made in the same location.
+ggplot(confirmation_set, aes(carat, price, color=cut)) +
+        geom_point() + 
+        ggtitle("Price vs Carat")
+ggplot(confirmation_set, aes(color_in_num_order, price)) +
+        geom_point() + 
+        ggtitle("Price vs Color")
+ggplot(confirmation_set, aes(clarity_in_num_order, price)) +
+        geom_point() + 
+        ggtitle("Price vs Clarity")
+
+coeftest(mod2, vcovHC(mod2))
+vcovHC(mod2)
+ols_vif_tol(mod2)
+anova(mod2,mod2,test = "F")
+anova(mod2,mod1,test = "F")
+```
+
+``` {r linear model 3, message = FALSE, include=FALSE, fig.show='hide'}
+mod3 = lm(formula = (price ~ carat + color_in_num_order + clarity_in_num_order + volume), data = confirmation_set)
+summary(mod3)
+
+hist(carat_dist, main= "Carat Distribution")
+hist(confirmation_set$price, main= "Price Distribution")
+
+#skewness for carat
+skewness(confirmation_set$carat)
+#skewness for price
+skewness(confirmation_set$price)
+#skewness for volume
+skewness(confirmation_set$volume)
+#skewness for Clarity
+skewness(confirmation_set$clarity_in_num_order)
+#skewness for Color
+skewness(confirmation_set$color_in_num_order)
+
+#The dataset could be clustered if the diamonds was made in the same location.
+ggplot(confirmation_set, aes(carat, price, color=cut)) +
+        geom_point() + 
+        ggtitle("Price vs Carat")
+ggplot(confirmation_set, aes(color_in_num_order, price)) +
+        geom_point() + 
+        ggtitle("Price vs Color")
+ggplot(confirmation_set, aes(clarity_in_num_order, price)) +
+        geom_point() + 
+        ggtitle("Price vs Clarity")
+ggplot(confirmation_set, aes(volume, price)) +
+        geom_point() + 
+        ggtitle("Price vs Volume")
+
+coeftest(mod3, vcovHC(mod3))
+vcovHC(mod3)
+ols_vif_tol(mod3)
+anova(mod3,mod2,test = "F")
+anova(mod3,mod1,test = "F")
+```
+
+
+```{r display regression table, echo=FALSE, include=FALSE}
+stargazer(mod1, mod2, mod3, 
+          #type = "latex",
+          type = "text",
+          style = "default", 
+          out = "models.txt", 
+          #column.labels = c("Mod1", "Mod2", "Mod3"), 
+          column.labels = NULL,
+          column.separate = NULL,
+          intercept.bottom = FALSE,
+          header = FALSE,
+          digits = 2,
+          title = "Estimated Regressions",
+          dep.var.caption  = "Output Variable: price per carat",
+          dep.var.labels   = c("","",""),
+          star.cutoffs = c(0.05, 0.01, 0.001),
+          covariate.labels = c("Constant", "Carat", "Color", "Clarity", "Volume (Length * Width * Depth)"),
+          align = TRUE,
+          no.space=TRUE,
+          omit.stat = "f",
+          notes = "\\parbox[t]{7cm}{$HC_1$ robust standard errors in parentheses.}" 
+          )
+
+```
+
+
+
+# Results
+The stargazer table shows the results of the three log-log regressions, and model 1 is our baseline model. Across all linear models, the key coefficient was carats and was highly and statistically significant. It is a positive coefficient with point estimates ranging from 1.38 to 1.87. Model 2 has the highest positive coefficient for carats of 1.87, while models 1 and 3 also have the positive coefficient for carats of 1.68 and 1.38 respectively. We notice in model 3, volume is highly correlated with carat and takes away some explainability of carat, so we decided model 2 is best suited for our estimations. Applying model 2 with the point estimates of 1.87, we interpreted the result that a 10\% increase in carats results in a 19.51% increase in price, and a 20\% increase in carats is a 40.63% increase in price ^[Log Transformation: Purpose and Interpretation. "https://medium.com/@kyawsawhtoon/log-transformation-purpose-and-interpretation-9444b4b049c9"]. As a result, the new equipment with the new process that increases the carats has both practical and statistical significance to the synthetic diamond sales price.
+
+In model 2, we include the independent variables of color and clarity in the linear models. We want to find out if these two variables have any effect on the industrial diamond price. The regression table results show that both variables are highly and statistically significant and have a negative coefficient. Therefore, it confirms that they do affect the industrial diamond price.
+
+The main difference between models 2 and 3 is the additional independent variable of volume. In model 3, we added an interaction term of volume, which is the product of industrial diamond length, width, and depth.The regression table shows that it is also statistically significant.\newline
+
+![](images/stargazer_table.jpg)
+
+
+# Limitations
+The model has over fifty-seven thousand data points which satisfy the large sample assumption model and allows us to apply a less stringent OLS regression with fewer assumptions. The first assumption is independence and identically distributed (IID) Data. The data could be assumed independent since the data was collected randomly; however, the geographic sampling location of the data is unknown. This could lead to the clustering of information on diamond prices, and the geographic location of buying a diamond could vary the price. The data is identically distributed since we did not remove a significant amount of data (less than 0.04% of data) before or after creating the model and the data points come from the same probability distribution. Please refer to the brief description section for data removal before modeling. 
+
+The other aspect to investigate is the variance of the tails. We plotted the histograms of the metric variables (model, price, carat, and volume) and noticed non-normal distributions. The distributions seen were bimodal and skewed, which could lead to a bias in the model's estimate.
+There seems to be some conflict with the large sample assumption of a unique best linear predictor (BLP), given the distribution of price on carat does display heavy tails. This does not mean the predictor is inaccurate in predicting price; however, we can not assume there is a unique BLP.
+
+Omitted variables do not interact with the key variable in the true model in the classic omitted variables framework. There may be unknown variables that may bias our estimates that could bias our estimate positively or negatively. For example, the labor costs leading to the sale of diamonds could be higher in certain economic conditions, driving up the cost of goods sold and, ultimately, the diamond price. There are such variables that we cannot account for, but it could contribute to our omitted variable bias.
+
+
+# Conclusion
+In our models, carat is the most important feature in determining the price of a synthetic diamond with the largest coefficient in the regression tables. However, the regression tables also showed there are other predictors of note in volume, clarity and color, potentially adding bias to our estimates that showed 10% and 20% increases in carats leads to 19.51% and 40.63% increases of sale price respectively. That said, with 0.98 for R-squared we have enough confidence to recommend that Acme Synthetic Diamond Company should upgrade to the new equipment. We estimate the larger diamonds produced in carats will bring in more sales revenue, allowing them to pay off the new equipment investment in about three years.
+
+In future research, we may want to collect additional data to estimate the diamond price further. Possible new variables include seasonality, Gemological Institute of America (GIA) certification, the energy used in the manufacturing process, the diamond shape, the jewelry type, or other factors. We hope our research can help Acme Synthetic Diamond Company produce beautiful and profitable industrial diamonds for generations of customers to come.
+
+
